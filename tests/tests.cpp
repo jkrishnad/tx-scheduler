@@ -1,9 +1,12 @@
 #include <algorithm>
+#include <chrono>
 #include <print>
 #include <random>
 #include <string_view>
+#include <thread>
 #include <vector>
 
+#include "bench.hpp"
 #include "stats.hpp"
 
 static int failures{};
@@ -73,8 +76,40 @@ static void test_stats() {
     }
 }
 
+static void test_bench() {
+    // Returns one sample per run
+    {
+        std::vector<double> samples = time_runs([] {}, 100);
+        check(samples.size() == 100, "bench: 100 runs give 100 samples");
+        check(std::ranges::all_of(samples, [](double ns) { return ns >= 0; }),
+              "bench: every sample is >= 0");
+    }
+
+    // Calls the function exactly `runs` times
+    {
+        int calls{0};
+        time_runs([&calls] { ++calls; }, 50);
+        check(calls == 50, "bench: function called 50 times");
+    }
+
+    // Zero runs gives no samples
+    {
+        std::vector<double> samples = time_runs([] {}, 0);
+        check(samples.empty(), "bench: 0 runs give no samples");
+    }
+
+    // Samples are in nanoseconds: a 1 ms sleep takes at least 1,000,000 ns
+    {
+        std::vector<double> samples =
+            time_runs([] { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }, 3);
+        check(std::ranges::all_of(samples, [](double ns) { return ns >= 1'000'000; }),
+              "bench: 1 ms sleep measures >= 1,000,000 ns");
+    }
+}
+
 int main() {
     test_stats();
+    test_bench();
 
     std::println("\n{} failures.", failures);
     return failures == 0 ? 0 : 1;

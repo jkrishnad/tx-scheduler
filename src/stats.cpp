@@ -53,5 +53,5 @@ void print_stats(std::string_view label, const Stats &stats) {
     std::print("p50={:.0f} ", stats.p50);
     std::print("p99={:.0f} ", stats.p99);
     std::print("p99.9={:.0f} ", stats.p999);
-    std::print("max={:.0f} ", stats.max);
+    std::print("max={:.0f} \n", stats.max);
 }
