@@ -20,10 +20,10 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-#include "bench.hpp"
-#include "shm.hpp"
-#include "socket.hpp"
-#include "stats.hpp"
+#include "headers/bench.hpp"
+#include "headers/shm.hpp"
+#include "headers/socket.hpp"
+#include "headers/stats.hpp"
 
 static int failures{};
 
