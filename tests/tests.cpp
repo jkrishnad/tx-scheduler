@@ -21,9 +21,98 @@
 #include <unistd.h>
 
 #include "headers/bench.hpp"
+#include "headers/bindings.hpp"
 #include "headers/shm.hpp"
 #include "headers/socket.hpp"
 #include "headers/stats.hpp"
+
+// Layout checks: every size and field offset must match Agave's Rust structs
+// (agave-scheduler-bindings 6.0.0, agave-scheduler-handshake 7.0.0) byte for
+// byte. A mismatch fails the build.
+
+static_assert(sizeof(ProtocolVersions) == 32);
+static_assert(offsetof(ProtocolVersions, handshake) == 0);
+static_assert(offsetof(ProtocolVersions, scheduler_bindings) == 8);
+static_assert(offsetof(ProtocolVersions, shaq) == 16);
+static_assert(offsetof(ProtocolVersions, rts_alloc) == 24);
+
+static_assert(sizeof(ClientLogon) == 88);
+static_assert(offsetof(ClientLogon, worker_count) == 0);
+static_assert(offsetof(ClientLogon, check_worker_count) == 8);
+static_assert(offsetof(ClientLogon, allocator_size) == 16);
+static_assert(offsetof(ClientLogon, allocator_handles) == 24);
+static_assert(offsetof(ClientLogon, tpu_to_pack_capacity) == 32);
+static_assert(offsetof(ClientLogon, progress_tracker_capacity) == 40);
+static_assert(offsetof(ClientLogon, pack_to_worker_capacity) == 48);
+static_assert(offsetof(ClientLogon, worker_to_pack_capacity) == 56);
+static_assert(offsetof(ClientLogon, pack_to_check_worker_capacity) == 64);
+static_assert(offsetof(ClientLogon, check_worker_to_pack_capacity) == 72);
+static_assert(offsetof(ClientLogon, flags) == 80);
+
+static_assert(sizeof(SharableTransactionRegion) == 16);
+static_assert(offsetof(SharableTransactionRegion, offset) == 0);
+static_assert(offsetof(SharableTransactionRegion, length) == 8);
+
+static_assert(sizeof(SharableTransactionBatchRegion) == 16);
+static_assert(offsetof(SharableTransactionBatchRegion, num_transactions) == 0);
+static_assert(offsetof(SharableTransactionBatchRegion, transactions_offset) ==
+              8);
+
+static_assert(sizeof(ExecutionResponseRegion) == 16);
+static_assert(offsetof(ExecutionResponseRegion, num_transaction_responses) ==
+              0);
+static_assert(offsetof(ExecutionResponseRegion, transaction_responses_offset) ==
+              8);
+
+static_assert(sizeof(TpuToPackMessage) == 40);
+static_assert(offsetof(TpuToPackMessage, transaction) == 0);
+static_assert(offsetof(TpuToPackMessage, flags) == 16);
+static_assert(offsetof(TpuToPackMessage, src_addr) == 17);
+
+static_assert(sizeof(ProgressMessage) == 96);
+static_assert(offsetof(ProgressMessage, leader_state) == 0);
+static_assert(offsetof(ProgressMessage, current_slot_progress) == 1);
+static_assert(offsetof(ProgressMessage, epoch) == 8);
+static_assert(offsetof(ProgressMessage, current_slot) == 16);
+static_assert(offsetof(ProgressMessage, next_leader_slot) == 24);
+static_assert(offsetof(ProgressMessage, leader_range_end) == 32);
+static_assert(offsetof(ProgressMessage, remaining_cost_units) == 40);
+static_assert(offsetof(ProgressMessage,
+                       remaining_allocated_accounts_data_size) == 48);
+static_assert(offsetof(ProgressMessage, latest_blockhash) == 56);
+static_assert(offsetof(ProgressMessage, target_bank_time_ms) == 88);
+
+static_assert(sizeof(PackToExecutionWorkerMessage) == 32);
+static_assert(offsetof(PackToExecutionWorkerMessage, flags) == 0);
+static_assert(offsetof(PackToExecutionWorkerMessage, max_working_slot) == 8);
+static_assert(offsetof(PackToExecutionWorkerMessage, batch) == 16);
+
+static_assert(sizeof(ExecutionWorkerToPackMessage) == 40);
+static_assert(offsetof(ExecutionWorkerToPackMessage, batch) == 0);
+static_assert(offsetof(ExecutionWorkerToPackMessage, processed_code) == 16);
+static_assert(offsetof(ExecutionWorkerToPackMessage, responses) == 24);
+
+static_assert(sizeof(ExecutionResponse) == 32);
+static_assert(offsetof(ExecutionResponse, execution_slot) == 0);
+static_assert(offsetof(ExecutionResponse, not_included_reason) == 8);
+static_assert(offsetof(ExecutionResponse, cost_units) == 16);
+static_assert(offsetof(ExecutionResponse, fee_payer_balance) == 24);
+
+// Field widths: a wider type can still land on the right offset (it fills the
+// padding), but then it reads padding bytes as part of the value.
+static_assert(sizeof(SharableTransactionRegion::length) == 4);
+static_assert(sizeof(SharableTransactionBatchRegion::num_transactions) == 1);
+static_assert(sizeof(ExecutionResponseRegion::num_transaction_responses) == 1);
+static_assert(sizeof(TpuToPackMessage::flags) == 1);
+static_assert(sizeof(TpuToPackMessage::src_addr) == 16);
+static_assert(sizeof(ProgressMessage::leader_state) == 1);
+static_assert(sizeof(ProgressMessage::current_slot_progress) == 1);
+static_assert(sizeof(ProgressMessage::latest_blockhash) == 32);
+static_assert(sizeof(ProgressMessage::target_bank_time_ms) == 2);
+static_assert(sizeof(PackToExecutionWorkerMessage::flags) == 2);
+static_assert(sizeof(ExecutionWorkerToPackMessage::processed_code) == 1);
+static_assert(sizeof(ExecutionResponse::not_included_reason) == 1);
+static_assert(alignof(TpuToPackMessage) == 8);
 
 static int failures{};
 
