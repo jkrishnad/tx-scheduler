@@ -14,12 +14,14 @@
 #include <thread>
 #include <vector>
 
+#include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 #include "bench.hpp"
+#include "shm.hpp"
 #include "socket.hpp"
 #include "stats.hpp"
 
@@ -304,10 +306,122 @@ static void test_socket() {
     }
 }
 
+// A temp file of a given size: stands in for a memory block Agave created.
+struct TestFile {
+    std::string path{
+        (std::filesystem::temp_directory_path() / "tx-scheduler-test.shm")
+            .string()};
+
+    explicit TestFile(off_t size) {
+        int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        ::ftruncate(fd, size);
+        ::close(fd);
+    }
+    ~TestFile() { ::unlink(path.c_str()); }
+
+    int open_fd() const { return ::open(path.c_str(), O_RDWR); }
+};
+
+static bool fd_is_open(int fd) { return ::fcntl(fd, F_GETFD) != -1; }
+
+static void test_shm() {
+    // Size comes from the fd, and a new block reads as zeros
+    {
+        TestFile file{4096};
+        SharedRegion region{file.open_fd()};
+        check(region.size() == 4096, "shm: size read from the fd");
+        bool zeros = std::all_of(region.data(), region.data() + region.size(),
+                                 [](std::byte b) { return b == std::byte{0}; });
+        check(zeros, "shm: new block reads as zeros");
+    }
+
+    // Writes through data() reach the block
+    {
+        TestFile file{4096};
+        SharedRegion region{file.open_fd()};
+        region.data()[0] = std::byte{'j'};
+        region.data()[1] = std::byte{'k'};
+
+        char buf[2]{};
+        int other = file.open_fd();
+        ::pread(other, buf, 2, 0);
+        ::close(other);
+        check(buf[0] == 'j' && buf[1] == 'k',
+              "shm: writes through data() reach the block");
+    }
+
+    // Writes from another fd show up in data()
+    {
+        TestFile file{4096};
+        SharedRegion region{file.open_fd()};
+
+        int other = file.open_fd();
+        ::pwrite(other, "hi", 2, 100);
+        ::close(other);
+        check(region.data()[100] == std::byte{'h'} &&
+                  region.data()[101] == std::byte{'i'},
+              "shm: writes from another fd show up in data()");
+    }
+
+    // Destructor closes the fd
+    {
+        TestFile file{4096};
+        int fd = file.open_fd();
+        {
+            SharedRegion region{fd};
+        }
+        check(!fd_is_open(fd), "shm: destructor closes the fd");
+    }
+
+    // A bad fd throws
+    {
+        bool threw = false;
+        try {
+            SharedRegion region{-1};
+        } catch (const std::system_error &) {
+            threw = true;
+        }
+        check(threw, "shm: bad fd throws");
+    }
+
+    // A failed map throws and still closes the fd (an empty block can't map)
+    {
+        TestFile file{0};
+        int fd = file.open_fd();
+        bool threw = false;
+        try {
+            SharedRegion region{fd};
+        } catch (const std::system_error &) {
+            threw = true;
+        }
+        check(threw && !fd_is_open(fd),
+              "shm: failed map throws and closes the fd");
+    }
+
+    // Move: the new region owns the mapping, the old one owns nothing
+    {
+        TestFile file{4096};
+        int fd = file.open_fd();
+        std::optional<SharedRegion> a;
+        a.emplace(fd);
+        a->data()[0] = std::byte{'m'};
+
+        SharedRegion b{std::move(*a)};
+        check(a->data() == nullptr && a->size() == 0,
+              "shm: moved-from region owns nothing");
+
+        a.reset(); // destroys the moved-from region: must not unmap b's memory
+        check(fd_is_open(fd) && b.size() == 4096 &&
+                  b.data()[0] == std::byte{'m'},
+              "shm: moved-to region still works");
+    }
+}
+
 int main() {
     test_stats();
     test_bench();
     test_socket();
+    test_shm();
 
     std::println("\n{} failures.", failures);
     return failures == 0 ? 0 : 1;

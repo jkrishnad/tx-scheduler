@@ -20,7 +20,7 @@ add_compile_options("$<$<CONFIG:Release>:-O2>")
 add_link_options("$<$<CONFIG:Debug>:-fsanitize=address,undefined>")
 
 # Library
-add_library(tx_core src/stats.cpp src/socket.cpp)
+add_library(tx_core src/stats.cpp src/socket.cpp src/shm.cpp)
 target_include_directories(tx_core PUBLIC src)
 
 # Executables
