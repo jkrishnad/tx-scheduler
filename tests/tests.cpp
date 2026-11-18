@@ -1,7 +1,9 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <optional>
@@ -24,6 +26,7 @@
 #include "headers/bindings.hpp"
 #include "headers/shm.hpp"
 #include "headers/socket.hpp"
+#include "headers/spsc.hpp"
 #include "headers/stats.hpp"
 
 // Layout checks: every size and field offset must match Agave's Rust structs
@@ -506,11 +509,198 @@ static void test_shm() {
     }
 }
 
+// A test message: 16 bytes, so 4 slots fit after the 256-byte queue header.
+struct TestMsg {
+    std::uint64_t id;
+    std::uint64_t value;
+};
+
+// Plays Agave's side of a shaq SPSC queue. It maps the same file as the
+// consumer, the way two processes map the same block, and lays out the
+// header the way shaq 4.4.0 does: magic @0, version @8, buffer_mask @12,
+// write cursor @64, read cursor @128, slots from @256.
+struct FakeProducer {
+    static constexpr std::uint64_t magic = 0x7368617173707363; // "shaqspsc"
+    static constexpr std::uint32_t version = 3 << 16;
+    static constexpr std::size_t slots_offset = 256;
+
+    TestFile file;
+    SharedRegion region;
+    std::uint32_t mask;
+
+    // capacity must be a power of two
+    explicit FakeProducer(std::uint32_t capacity)
+        : file{static_cast<off_t>(slots_offset + capacity * sizeof(TestMsg))},
+          region{file.open_fd()}, mask{capacity - 1} {
+        set_header(magic, version, mask);
+    }
+
+    void set_header(std::uint64_t m, std::uint32_t v, std::uint32_t mk) {
+        std::memcpy(region.data() + 0, &m, sizeof(m));
+        std::memcpy(region.data() + 8, &v, sizeof(v));
+        std::memcpy(region.data() + 12, &mk, sizeof(mk));
+    }
+
+    std::atomic_ref<std::uint64_t> cursor(std::size_t offset) {
+        return std::atomic_ref<std::uint64_t>{
+            *reinterpret_cast<std::uint64_t *>(region.data() + offset)};
+    }
+    std::atomic_ref<std::uint64_t> write() { return cursor(64); }
+    std::atomic_ref<std::uint64_t> read() { return cursor(128); }
+
+    // Puts msg in its slot without announcing it.
+    void fill_slot(std::uint64_t position, TestMsg msg) {
+        std::memcpy(region.data() + slots_offset +
+                        (position & mask) * sizeof(TestMsg),
+                    &msg, sizeof(msg));
+    }
+
+    // Data first, then the write cursor.
+    void push(TestMsg msg) {
+        std::uint64_t w = write().load(std::memory_order_relaxed);
+        fill_slot(w, msg);
+        write().store(w + 1, std::memory_order_release);
+    }
+
+    // Starts both cursors at n, as if n messages already went through.
+    void skip_to(std::uint64_t n) {
+        write().store(n);
+        read().store(n);
+    }
+
+    // A second mapping of the same file, for the consumer.
+    SharedRegion consumer_region() const {
+        return SharedRegion{file.open_fd()};
+    }
+};
+
+static bool throws_on_join(FakeProducer &p) {
+    try {
+        SpscConsumer<TestMsg> q{p.consumer_region()};
+    } catch (const std::runtime_error &) {
+        return true;
+    }
+    return false;
+}
+
+static void test_spsc() {
+    // Joining checks the header the way shaq does
+    {
+        FakeProducer p{4};
+        p.set_header(0, FakeProducer::version, p.mask);
+        check(throws_on_join(p), "spsc: wrong magic throws");
+    }
+    {
+        FakeProducer p{4};
+        p.set_header(FakeProducer::magic, 2 << 16, p.mask);
+        check(throws_on_join(p), "spsc: wrong version throws");
+    }
+    {
+        FakeProducer p{4};
+        p.set_header(FakeProducer::magic, FakeProducer::version, 7);
+        check(throws_on_join(p), "spsc: mask that doesn't fit the file throws");
+    }
+
+    // Capacity comes from the header
+    {
+        FakeProducer p{4};
+        SpscConsumer<TestMsg> q{p.consumer_region()};
+        check(q.capacity() == 4, "spsc: capacity is 4");
+    }
+
+    // Empty: nothing to read, read cursor stays put
+    {
+        FakeProducer p{4};
+        SpscConsumer<TestMsg> q{p.consumer_region()};
+        check(!q.try_read().has_value(), "spsc: empty queue reads nothing");
+        check(p.read().load() == 0, "spsc: empty read leaves cursor at 0");
+    }
+
+    // One message: read it, cursor moves, then empty again
+    {
+        FakeProducer p{4};
+        SpscConsumer<TestMsg> q{p.consumer_region()};
+        p.push({1, 100});
+
+        std::optional<TestMsg> m = q.try_read();
+        check(m && m->id == 1 && m->value == 100,
+              "spsc: reads the pushed message");
+        check(p.read().load() == 1, "spsc: read cursor moves to 1");
+        check(!q.try_read().has_value(), "spsc: empty again after reading");
+    }
+
+    // A filled slot that write hasn't announced yet is not readable
+    {
+        FakeProducer p{4};
+        SpscConsumer<TestMsg> q{p.consumer_region()};
+        p.fill_slot(0, {9, 9});
+        check(!q.try_read().has_value(),
+              "spsc: slot data without write bump is not read");
+    }
+
+    // Cursors never reset: positions 6, 7, 8 land in slots 2, 3, 0
+    {
+        FakeProducer p{4};
+        p.skip_to(6);
+        SpscConsumer<TestMsg> q{p.consumer_region()};
+        p.push({6, 0});
+        p.push({7, 0});
+        p.push({8, 0});
+
+        std::optional<TestMsg> a = q.try_read();
+        std::optional<TestMsg> b = q.try_read();
+        std::optional<TestMsg> c = q.try_read();
+        check(a && b && c && a->id == 6 && b->id == 7 && c->id == 8,
+              "spsc: wraps around the ring in order");
+        check(p.read().load() == 9, "spsc: read cursor reaches 9");
+    }
+
+    // Live producer thread: 100,000 messages through 4 slots, none lost,
+    // none out of order
+    {
+        constexpr std::uint64_t total = 100'000;
+        FakeProducer p{4};
+        SpscConsumer<TestMsg> q{p.consumer_region()};
+
+        // Both sides give up after 5 s, so a broken consumer fails the test
+        // instead of hanging the run.
+        auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(5);
+
+        std::thread producer{[&p, deadline] {
+            for (std::uint64_t i = 0; i < total; ++i) {
+                // Full: wait for the consumer to free a slot
+                while (p.write().load(std::memory_order_relaxed) -
+                           p.read().load(std::memory_order_acquire) >
+                       p.mask) {
+                    if (std::chrono::steady_clock::now() > deadline) {
+                        return;
+                    }
+                }
+                p.push({i, i * 2});
+            }
+        }};
+
+        std::uint64_t got{0};
+        bool in_order{true};
+        while (got < total && std::chrono::steady_clock::now() < deadline) {
+            if (std::optional<TestMsg> m = q.try_read()) {
+                in_order = in_order && m->id == got && m->value == got * 2;
+                ++got;
+            }
+        }
+        producer.join();
+        check(got == total && in_order,
+              "spsc: 100,000 messages from a live producer, in order");
+    }
+}
+
 int main() {
     test_stats();
     test_bench();
     test_socket();
     test_shm();
+    test_spsc();
 
     std::println("\n{} failures.", failures);
     return failures == 0 ? 0 : 1;
