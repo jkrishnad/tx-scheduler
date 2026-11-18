@@ -22,6 +22,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include "headers/agave_link.hpp"
 #include "headers/bench.hpp"
 #include "headers/bindings.hpp"
 #include "headers/shm.hpp"
@@ -695,12 +696,131 @@ static void test_spsc() {
     }
 }
 
+// Plays Agave for one handshake on a background thread: accepts the client,
+// reads its 1024-byte logon, then answers with `reply` and `fds`.
+struct FakeAgave {
+    TestServer server;
+    std::vector<std::byte> logon;
+    std::thread thread;
+
+    FakeAgave(std::vector<std::byte> reply, std::vector<int> fds)
+        : thread{[this, reply, fds] {
+              server.accept_client();
+              logon = server.read_exact(1024);
+              server.send_with_fds(reply, fds);
+          }} {}
+
+    ~FakeAgave() {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+
+    // Waits for the handshake to finish, so `logon` is safe to read.
+    void finish() { thread.join(); }
+};
+
+static std::vector<std::byte> rejection(std::string_view reason) {
+    std::vector<std::byte> out{std::byte{0x02},
+                               static_cast<std::byte>(reason.size())};
+    for (char c : reason) {
+        out.push_back(static_cast<std::byte>(c));
+    }
+    return out;
+}
+
+static ClientLogon test_logon() {
+    ClientLogon logon{};
+    logon.worker_count = 1;
+    logon.check_worker_count = 1;
+    logon.allocator_size = 1 << 20;
+    logon.allocator_handles = 1;
+    logon.tpu_to_pack_capacity = 1024;
+    logon.progress_tracker_capacity = 256;
+    logon.pack_to_worker_capacity = 512;
+    logon.worker_to_pack_capacity = 512;
+    logon.pack_to_check_worker_capacity = 128;
+    logon.check_worker_to_pack_capacity = 128;
+    return logon;
+}
+
+static void test_agave_link() {
+    // The logon is 1024 bytes: versions @0, ClientLogon @32, zeros after
+    {
+        FakeAgave agave{rejection("test"), {}};
+        ClientLogon logon = test_logon();
+        try {
+            AgaveLink link{agave.server.path, logon};
+        } catch (const std::runtime_error &) {
+        }
+        agave.finish();
+
+        check(agave.logon.size() == 1024, "agave: logon is 1024 bytes");
+
+        std::array<std::uint64_t, 4> versions{};
+        if (agave.logon.size() == 1024) {
+            std::memcpy(versions.data(), agave.logon.data(), 32);
+        }
+        // handshake 7, scheduler-bindings 6, shaq 3 << 16, rts-alloc 4 << 16
+        check(versions == std::array<std::uint64_t, 4>{7, 6, 3 << 16, 4 << 16},
+              "agave: versions match Agave 4.4.1");
+
+        bool logon_ok = agave.logon.size() == 1024 &&
+                        std::memcmp(agave.logon.data() + 32, &logon,
+                                    sizeof(logon)) == 0;
+        check(logon_ok, "agave: ClientLogon sits at byte 32");
+
+        bool rest_zero =
+            agave.logon.size() == 1024 &&
+            std::all_of(agave.logon.begin() + 32 + sizeof(ClientLogon),
+                        agave.logon.end(),
+                        [](std::byte b) { return b == std::byte{0}; });
+        check(rest_zero, "agave: bytes after ClientLogon are zero");
+    }
+
+    // A rejection throws, with Agave's reason in the message
+    {
+        FakeAgave agave{rejection("Worker count; count=0"), {}};
+        std::string what;
+        try {
+            AgaveLink link{agave.server.path, test_logon()};
+        } catch (const std::runtime_error &e) {
+            what = e.what();
+        }
+        check(what.find("Worker count; count=0") != std::string::npos,
+              "agave: rejection throws with Agave's reason");
+    }
+
+    // Success with the wrong number of fds throws
+    // (1 worker means 5 + 2 * 1 = 7 fds; send 3)
+    {
+        int pipe_fds[2];
+        ::pipe(pipe_fds);
+        int extra = ::dup(pipe_fds[0]);
+
+        FakeAgave agave{bytes_of({0x01}), {pipe_fds[0], pipe_fds[1], extra}};
+        bool threw{false};
+        try {
+            AgaveLink link{agave.server.path, test_logon()};
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        agave.finish();
+        check(threw, "agave: wrong fd count throws");
+
+        ::close(pipe_fds[0]);
+        ::close(pipe_fds[1]);
+        ::close(extra);
+    }
+}
+
 int main() {
     test_stats();
     test_bench();
     test_socket();
     test_shm();
     test_spsc();
+    test_agave_link();
 
     std::println("\n{} failures.", failures);
     return failures == 0 ? 0 : 1;
