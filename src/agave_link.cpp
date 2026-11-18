@@ -8,6 +8,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <unistd.h>
+#include <utility>
 
 AgaveLink::AgaveLink(const std::string &path, const ClientLogon &logon) {
     UnixSocket socket{path};
@@ -43,4 +44,16 @@ AgaveLink::AgaveLink(const std::string &path, const ClientLogon &logon) {
         }
         throw std::runtime_error("Agave returned incorrect number of fds");
     }
+
+    std::vector<SharedRegion> regions;
+    regions.reserve(r.fds.size());
+
+    for (int fd : r.fds) {
+        regions.emplace_back(fd);
+    }
+
+    tpu_to_pack_.emplace(std::move(regions[1]));
+    progress_.emplace(std::move(regions[2]));
+
+    regions_ = std::move(regions);
 }
