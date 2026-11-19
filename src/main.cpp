@@ -1,6 +1,7 @@
 #include "headers/agave_link.hpp"
 #include "headers/base58.hpp"
 #include "headers/bindings.hpp"
+#include "headers/color.hpp"
 #include "headers/shm.hpp"
 #include <chrono>
 #include <cstddef>
@@ -31,10 +32,12 @@ tx_signature(const SharedRegion &alloc,
 
     return base58_encode(tx.subspan(1, 64));
 }
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         std::println(stderr,
-                     "usage: scheduler <ledger>/scheduler_bindings.ipc");
+                     "{}usage: scheduler <ledger>/scheduler_bindings.ipc{}",
+                     color::err(color::RED), color::err(color::RESET));
         return 1;
     }
     std::string path = argv[1];
@@ -57,8 +60,9 @@ int main(int argc, char **argv) {
 
     try {
         AgaveLink link{path, logon};
-        std::println("connected: tpu_to_pack= {} slots, progress= {} slots",
-                     link.tpu_to_pack().capacity(), link.progress().capacity());
+        std::println("{}connected: tpu_to_pack= {} slots, progress= {} slots{}",
+                     color::out(color::BOLD), link.tpu_to_pack().capacity(),
+                     link.progress().capacity(), color::out(color::RESET));
 
         std::uint64_t last_slot = 0;
         while (true) {
@@ -66,21 +70,27 @@ int main(int argc, char **argv) {
 
             if (auto p = link.progress().try_read()) {
                 idle = false;
-                if (p->current_slot > last_slot) {
+                if (p->current_slot != last_slot) {
                     last_slot = p->current_slot;
-                    std::println("slot {}, leader_state {}", p->current_slot,
-                                 p->leader_state);
+                    std::println("{} {}", color::paint(color::SLOT, "slot"),
+                                 p->current_slot);
                 }
             }
 
             if (auto m = link.tpu_to_pack().try_read()) {
                 idle = false;
                 if (auto sig = tx_signature(link.allocator(), m->transaction)) {
-                    std::println("tx {} len={} flags={}", *sig,
-                                 m->transaction.length, m->flags);
+                    // Signatures are 87-88 chars: pad so the columns line up.
+                    std::println("  {}  {:<88}  {} {:>4}  {} {}",
+                                 color::paint(color::TX, "tx"), *sig,
+                                 color::paint(color::KEY, "len"),
+                                 m->transaction.length,
+                                 color::paint(color::KEY, "flags"), m->flags);
                 } else {
-                    std::println(stderr, "tx: bad region offset={} len={}",
-                                 m->transaction.offset, m->transaction.length);
+                    std::println(stderr, "{}tx: bad region offset={} len={}{}",
+                                 color::err(color::RED), m->transaction.offset,
+                                 m->transaction.length,
+                                 color::err(color::RESET));
                 }
             }
 
@@ -89,7 +99,8 @@ int main(int argc, char **argv) {
             }
         }
     } catch (const std::exception &e) {
-        std::println(stderr, "scheduler failed: {}", e.what());
+        std::println(stderr, "{}scheduler failed: {}{}", color::err(color::RED),
+                     e.what(), color::err(color::RESET));
         return 1;
     }
 }
