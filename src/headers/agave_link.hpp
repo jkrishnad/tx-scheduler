@@ -17,7 +17,7 @@ inline constexpr std::uint64_t RTS_ALLOC = 4 << 16;
 class AgaveLink {
   public:
     AgaveLink(const std::string &path, const ClientLogon &logon);
-
+    const SharedRegion &allocator() const { return regions_[0]; }
     SpscConsumer<TpuToPackMessage> &tpu_to_pack() { return *tpu_to_pack_; }
     SpscConsumer<ProgressMessage> &progress() { return *progress_; }
 

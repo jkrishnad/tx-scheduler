@@ -1,13 +1,36 @@
 #include "headers/agave_link.hpp"
+#include "headers/base58.hpp"
 #include "headers/bindings.hpp"
+#include "headers/shm.hpp"
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <optional>
 #include <print>
+#include <span>
 #include <string>
 #include <thread>
 
+static std::optional<std::string>
+tx_signature(const SharedRegion &alloc,
+             const SharableTransactionRegion &region) {
+
+    std::size_t offset = region.offset;
+    std::size_t length = region.length;
+    if (offset > alloc.size() || length > alloc.size() - offset) {
+        return std::nullopt;
+    }
+
+    std::span<const std::byte> tx{alloc.data() + offset, length};
+    if (tx.size() < 1 + 64 || tx[0] == std::byte{0} ||
+        (tx[0] & std::byte{0x80}) != std::byte{0}) {
+        return std::nullopt;
+    }
+
+    return base58_encode(tx.subspan(1, 64));
+}
 int main(int argc, char **argv) {
     if (argc != 2) {
         std::println(stderr,
@@ -52,9 +75,13 @@ int main(int argc, char **argv) {
 
             if (auto m = link.tpu_to_pack().try_read()) {
                 idle = false;
-                std::println("tx: offset:{}, length:{} flags:{}",
-                             m->transaction.offset, m->transaction.length,
-                             m->flags);
+                if (auto sig = tx_signature(link.allocator(), m->transaction)) {
+                    std::println("tx {} len={} flags={}", *sig,
+                                 m->transaction.length, m->flags);
+                } else {
+                    std::println(stderr, "tx: bad region offset={} len={}",
+                                 m->transaction.offset, m->transaction.length);
+                }
             }
 
             if (idle) {
