@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include "headers/agave_link.hpp"
+#include "headers/base58.hpp"
 #include "headers/bench.hpp"
 #include "headers/bindings.hpp"
 #include "headers/shm.hpp"
@@ -814,6 +815,50 @@ static void test_agave_link() {
     }
 }
 
+static std::vector<std::byte> hex_bytes(std::string_view hex) {
+    std::vector<std::byte> out;
+    for (std::size_t i = 0; i + 1 < hex.size(); i += 2) {
+        out.push_back(static_cast<std::byte>(
+            std::stoi(std::string{hex.substr(i, 2)}, nullptr, 16)));
+    }
+    return out;
+}
+
+static std::vector<std::byte> text_bytes(std::string_view text) {
+    std::vector<std::byte> out;
+    for (char c : text) {
+        out.push_back(static_cast<std::byte>(c));
+    }
+    return out;
+}
+
+static void test_base58() {
+    // Standard Bitcoin base58 vectors
+    check(base58_encode({}).empty(), "base58: empty input gives empty text");
+    check(base58_encode(hex_bytes("61")) == "2g", "base58: 0x61 is 2g");
+    check(base58_encode(hex_bytes("626262")) == "a3gV",
+          "base58: 0x626262 is a3gV");
+    check(base58_encode(text_bytes("Hello World!")) == "2NEpo7TZRRrLZSi2U",
+          "base58: Hello World!");
+
+    // Each leading zero byte becomes a '1'
+    check(base58_encode(hex_bytes("00")) == "1", "base58: one zero byte is 1");
+    check(base58_encode(hex_bytes("0000287fb4cd")) == "11233QC4",
+          "base58: two leading zeros give two 1s");
+    check(base58_encode(hex_bytes(
+              "00eb15231dfceb60925886b67d065299925915aeb172c06647")) ==
+              "1NS17iag9jJgTHD1VXjvLCEnZuQ3rJDE9L",
+          "base58: Bitcoin address");
+
+    // Signature-sized inputs (64 bytes)
+    check(base58_encode(std::vector<std::byte>(64)) == std::string(64, '1'),
+          "base58: 64 zero bytes are 64 1s");
+    check(base58_encode(std::vector<std::byte>(64, std::byte{0xff})) ==
+              "67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3"
+              "coV9nAkguBACzrU1iyZM4B8roQ",
+          "base58: 64 0xff bytes");
+}
+
 int main() {
     test_stats();
     test_bench();
@@ -821,6 +866,7 @@ int main() {
     test_shm();
     test_spsc();
     test_agave_link();
+    test_base58();
 
     std::println("\n{} failures.", failures);
     return failures == 0 ? 0 : 1;
