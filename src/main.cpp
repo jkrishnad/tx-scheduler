@@ -33,6 +33,54 @@ tx_signature(const SharedRegion &alloc,
     return base58_encode(tx.subspan(1, 64));
 }
 
+static void run(AgaveLink &link) {
+    std::uint64_t last_slot = 0;
+    using clock = std::chrono::steady_clock;
+    auto last_progress = clock::now();
+
+    std::println("{}connected: tpu_to_pack= {} slots, progress= {} slots{}",
+                 color::out(color::BOLD), link.tpu_to_pack().capacity(),
+                 link.progress().capacity(), color::out(color::RESET));
+
+    while (true) {
+        bool idle = true;
+
+        if (auto p = link.progress().try_read()) {
+            idle = false;
+            last_progress = clock::now();
+            if (p->current_slot != last_slot) {
+                last_slot = p->current_slot;
+                std::println("{} {}", color::paint(color::SLOT, "slot"),
+                             p->current_slot);
+            }
+        }
+
+        if (auto m = link.tpu_to_pack().try_read()) {
+            idle = false;
+            if (auto sig = tx_signature(link.allocator(), m->transaction)) {
+                // Signatures are 87-88 chars: pad so the columns line up.
+                std::println("  {}  {:<88}  {} {:>4}  {} {}",
+                             color::paint(color::TX, "tx"), *sig,
+                             color::paint(color::KEY, "len"),
+                             m->transaction.length,
+                             color::paint(color::KEY, "flags"), m->flags);
+            } else {
+                std::println(stderr, "{}tx: bad region offset={} len={}{}",
+                             color::err(color::RED), m->transaction.offset,
+                             m->transaction.length, color::err(color::RESET));
+            }
+        }
+
+        if (idle) {
+            if (clock::now() - last_progress > std::chrono::seconds(2)) {
+                return;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         std::println(stderr,
@@ -58,49 +106,15 @@ int main(int argc, char **argv) {
     logon.pack_to_check_worker_capacity = 128;
     logon.check_worker_to_pack_capacity = 128;
 
-    try {
-        AgaveLink link{path, logon};
-        std::println("{}connected: tpu_to_pack= {} slots, progress= {} slots{}",
-                     color::out(color::BOLD), link.tpu_to_pack().capacity(),
-                     link.progress().capacity(), color::out(color::RESET));
-
-        std::uint64_t last_slot = 0;
-        while (true) {
-            bool idle = true;
-
-            if (auto p = link.progress().try_read()) {
-                idle = false;
-                if (p->current_slot != last_slot) {
-                    last_slot = p->current_slot;
-                    std::println("{} {}", color::paint(color::SLOT, "slot"),
-                                 p->current_slot);
-                }
-            }
-
-            if (auto m = link.tpu_to_pack().try_read()) {
-                idle = false;
-                if (auto sig = tx_signature(link.allocator(), m->transaction)) {
-                    // Signatures are 87-88 chars: pad so the columns line up.
-                    std::println("  {}  {:<88}  {} {:>4}  {} {}",
-                                 color::paint(color::TX, "tx"), *sig,
-                                 color::paint(color::KEY, "len"),
-                                 m->transaction.length,
-                                 color::paint(color::KEY, "flags"), m->flags);
-                } else {
-                    std::println(stderr, "{}tx: bad region offset={} len={}{}",
-                                 color::err(color::RED), m->transaction.offset,
-                                 m->transaction.length,
-                                 color::err(color::RESET));
-                }
-            }
-
-            if (idle) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
+    while (true) {
+        try {
+            AgaveLink link{path, logon};
+            std::println("Agave Connected");
+            run(link);
+            std::println(stderr, "Agave went quiet, reconnecting");
+        } catch (const std::exception &e) {
+            std::println(stderr, "{}", e.what());
         }
-    } catch (const std::exception &e) {
-        std::println(stderr, "{}scheduler failed: {}{}", color::err(color::RED),
-                     e.what(), color::err(color::RESET));
-        return 1;
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 }
