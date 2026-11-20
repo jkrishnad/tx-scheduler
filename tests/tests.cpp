@@ -26,6 +26,7 @@
 #include "headers/base58.hpp"
 #include "headers/bench.hpp"
 #include "headers/bindings.hpp"
+#include "headers/rts_alloc.hpp"
 #include "headers/shm.hpp"
 #include "headers/socket.hpp"
 #include "headers/spsc.hpp"
@@ -992,6 +993,23 @@ static void test_spsc_producer() {
     }
 }
 
+static void test_rts_alloc() {
+    // A file that isn't an rts-alloc region can't be joined
+    {
+        TestFile file{4096};
+        int fd = file.open_fd();
+        bool threw = false;
+        try {
+            Allocator allocator{fd};
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        check(threw, "rts-alloc: joining a non-allocator file throws");
+        check(fd_is_open(fd), "rts-alloc: the fd stays with the caller");
+        ::close(fd);
+    }
+}
+
 int main() {
     test_stats();
     test_bench();
@@ -1001,6 +1019,7 @@ int main() {
     test_spsc_producer();
     test_agave_link();
     test_base58();
+    test_rts_alloc();
 
     std::println("\n{} failures.", failures);
     return failures == 0 ? 0 : 1;

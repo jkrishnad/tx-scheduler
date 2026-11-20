@@ -1,0 +1,12 @@
+[package]
+name = "rts-shim"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+# Must match the rts-alloc version Agave 4.4.1 uses.
+rts-alloc = "=5.1.0"

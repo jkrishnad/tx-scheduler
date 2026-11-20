@@ -19,9 +19,20 @@ add_compile_options("$<$<CONFIG:Release>:-O2>")
 # Link options
 add_link_options("$<$<CONFIG:Debug>:-fsanitize=address,undefined>")
 
+# Rust shim around rts-alloc (Agave's shared-memory allocator), built by Cargo
+# through Corrosion.
+include(FetchContent)
+FetchContent_Declare(
+  Corrosion
+  GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git
+  GIT_TAG v0.5.2)
+FetchContent_MakeAvailable(Corrosion)
+corrosion_import_crate(MANIFEST_PATH rts-shim/Cargo.toml)
+
 # Library
-add_library(tx_core src/stats.cpp src/socket.cpp src/shm.cpp src/agave_link.cpp src/base58.cpp)
+add_library(tx_core src/stats.cpp src/socket.cpp src/shm.cpp src/agave_link.cpp src/base58.cpp src/rts_alloc.cpp)
 target_include_directories(tx_core PUBLIC src)
+target_link_libraries(tx_core PUBLIC rts_shim)
 
 # Executables
 add_executable(scheduler src/main.cpp)
