@@ -23,42 +23,45 @@ inline constexpr std::size_t READ_OFFSET = 128;
 inline constexpr std::size_t SLOTS_OFFSET = 256;
 } // namespace shaq
 
+template <typename T> std::size_t shaq_join(const SharedRegion &region) {
+    if (region.size() < shaq::SLOTS_OFFSET) {
+        throw std::runtime_error("spsc: region smaller than the header");
+    }
+
+    std::uint64_t magic{};
+    std::uint32_t version{};
+    std::uint32_t mask{};
+    std::memcpy(&magic, region.data() + shaq::MAGIC_OFFSET, sizeof(magic));
+    std::memcpy(&version, region.data() + shaq::VERSION_OFFSET,
+                sizeof(version));
+    std::memcpy(&mask, region.data() + shaq::MASK_OFFSET, sizeof(mask));
+
+    if (magic != shaq::MAGIC) {
+        throw std::runtime_error("spsc: wrong magic");
+    }
+    if (version != shaq::VERSION) {
+        throw std::runtime_error("spsc: wrong version");
+    }
+
+    // shaq rounds the slot count down to a power of two.
+    std::size_t items = (region.size() - shaq::SLOTS_OFFSET) / sizeof(T);
+    std::size_t cap{1};
+    while (cap * 2 <= items) {
+        cap *= 2;
+    }
+    if (items == 0 || std::size_t{mask} + 1 != cap) {
+        throw std::runtime_error("spsc: mask doesn't fit the region");
+    }
+
+    return mask;
+}
+
 template <typename T> class SpscConsumer {
     static_assert(std::is_trivially_copyable_v<T>);
 
   public:
-    explicit SpscConsumer(SharedRegion region) : region_(std::move(region)) {
-        if (region_.size() < shaq::SLOTS_OFFSET) {
-            throw std::runtime_error("spsc: region smaller than the header");
-        }
-
-        std::uint64_t magic{};
-        std::uint32_t version{};
-        std::uint32_t mask{};
-        std::memcpy(&magic, region_.data() + shaq::MAGIC_OFFSET, sizeof(magic));
-        std::memcpy(&version, region_.data() + shaq::VERSION_OFFSET,
-                    sizeof(version));
-        std::memcpy(&mask, region_.data() + shaq::MASK_OFFSET, sizeof(mask));
-
-        if (magic != shaq::MAGIC) {
-            throw std::runtime_error("spsc: wrong magic");
-        }
-        if (version != shaq::VERSION) {
-            throw std::runtime_error("spsc: wrong version");
-        }
-
-        // shaq rounds the slot count down to a power of two.
-        std::size_t items = (region_.size() - shaq::SLOTS_OFFSET) / sizeof(T);
-        std::size_t cap{1};
-        while (cap * 2 <= items) {
-            cap *= 2;
-        }
-        if (items == 0 || std::size_t{mask} + 1 != cap) {
-            throw std::runtime_error("spsc: mask doesn't fit the region");
-        }
-
-        mask_ = mask;
-    }
+    explicit SpscConsumer(SharedRegion region)
+        : region_(std::move(region)), mask_(shaq_join<T>(region_)) {}
 
     std::optional<T> try_read() {
         std::atomic_ref<uint64_t> write = cursor(shaq::WRITE_OFFSET);
@@ -81,6 +84,42 @@ template <typename T> class SpscConsumer {
         return value;
     }
 
+    std::size_t capacity() const { return mask_ + 1; };
+
+  private:
+    SharedRegion region_;
+    std::size_t mask_{0};
+
+    std::atomic_ref<uint64_t> cursor(size_t offset) {
+        return std::atomic_ref<std::uint64_t>{
+            *reinterpret_cast<std::uint64_t *>(region_.data() + offset)};
+    };
+};
+
+template <typename T> class SpscProducer {
+    static_assert(std::is_trivially_copyable_v<T>);
+
+  public:
+    explicit SpscProducer(SharedRegion region)
+        : region_(std::move(region)), mask_(shaq_join<T>(region_)) {}
+
+    bool try_write(const T &value) {
+        std::atomic_ref<uint64_t> write = cursor(shaq::WRITE_OFFSET);
+        std::atomic_ref<uint64_t> read = cursor(shaq::READ_OFFSET);
+
+        uint64_t w = write.load(std::memory_order_relaxed);
+        uint64_t r = read.load(std::memory_order_acquire);
+
+        if (w - r >= capacity()) {
+            return false;
+        }
+
+        size_t slot_ind = w & mask_;
+        std::memcpy(region_.data() + shaq::SLOTS_OFFSET + slot_ind * sizeof(T),
+                    &value, sizeof(T));
+        write.store(w + 1, std::memory_order_release);
+        return true;
+    };
     std::size_t capacity() const { return mask_ + 1; };
 
   private:
